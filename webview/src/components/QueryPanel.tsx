@@ -337,6 +337,7 @@ export default function QueryPanel({ onLogout }: Props) {
                     minWidth: "120px",
                   }}>
                     {formatTime(event._time)}
+
                   </span>
                   <span style={{ color: "var(--vscode-foreground)" }}>
                     {event.message ?? event.event_type ?? "event"}
@@ -377,6 +378,30 @@ function getSeverityColor(severity?: string): string {
 
 function formatTime(t?: string): string {
   if (!t) return "";
-  try { return new Date(t).toLocaleTimeString(); }
-  catch { return t; }
+
+  const isoFormatted = t.replace(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})/, "$1T$2");
+  
+  const strippedTime = isoFormatted.replace(/\s+[A-Za-z\s]+$/, "");
+
+  const d = new Date(strippedTime);
+
+  if (!isNaN(d.getTime())) {
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const year = d.getFullYear();
+    const time = d.toLocaleTimeString();
+    
+    return `${day}/${month}/${year} ${time}`;
+  }
+
+  const dateMatch = t.match(/(\d{4})-(\d{2})-(\d{2})/);
+  const timeMatch = t.match(/\b(\d{2}:\d{2}:\d{2})\b/);
+  
+  if (dateMatch && timeMatch) {
+    return `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1]} ${timeMatch[1]}`;
+  } else if (timeMatch) {
+    return timeMatch[1]; 
+  }
+
+  return t;
 }

@@ -9,7 +9,7 @@
     "type": "git",
     "url": "https://github.com/BalramMardi/Splunklens"
   },
-  "icon": "assets/icon.png",
+  "icon": "assets/logo.png",
   "engines": {
     "vscode": "^1.120.0"
   },
@@ -40,8 +40,10 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
-    "build": "npm run build:webview && node esbuild.js",
-    "build:webview": "cd webview && npm run build && cd .. && shx cp -r webview/dist webview-dist",
+    "build": "npm run build:win && node esbuild.js",
+    "build:mac": "npm run build:webview-mac && node esbuild.js",
+    "build:win": "cd webview && npm run build && cd .. && xcopy /E /Y /I webview\\dist webview-dist",
+    "build:webview-mac": "cd webview && npm run build && cd .. && rm -rf webview-dist && cp -r webview/dist webview-dist",
     "watch": "node esbuild.js --watch",
     "compile": "node esbuild.js",
     "lint": "eslint src"

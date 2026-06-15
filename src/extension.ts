@@ -146,20 +146,26 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
 
             for (const event of events) {
               const row = keys.map(key => {
-                let val = event[key];
-                if (val === null || val === undefined) {
+                let rawVal = event[key];
+                
+                if (rawVal === null || rawVal === undefined) {
                   return "";
                 }
-                if (typeof val === "object") {
-                  val = JSON.stringify(val);
+                
+                let strVal: string;
+                if (typeof rawVal === "object") {
+                  strVal = JSON.stringify(rawVal);
                 } else {
-                  val = String(val);
+                  strVal = String(rawVal);
                 }
-                val = val.replace(/"/g, '""');
-                if (val.includes(",") || val.includes('"') || val.includes("\n")) {
-                  return `"${val}"`;
+                
+                strVal = strVal.replace(/"/g, '""');
+                
+                if (strVal.includes(",") || strVal.includes('"') || strVal.includes("\n")) {
+                  return `"${strVal}"`;
                 }
-                return val;
+                
+                return strVal;
               });
               csv += row.join(",") + "\n";
             }
@@ -217,11 +223,11 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
   ) {
     let timerId: ReturnType<typeof setTimeout> | undefined;
     
-    // Set up cancellation tracking
+  
     this._currentAbortController = new AbortController();
     const signal = this._currentAbortController.signal;
 
-    // A helper promise that immediately rejects if the user hits "Stop"
+  
     const abortPromise = new Promise<never>((_, reject) => {
       if (signal.aborted) return reject(new Error("Query cancelled by user."));
       signal.addEventListener("abort", () => reject(new Error("Query cancelled by user.")));
@@ -239,7 +245,7 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
         payload: { message: `Translating query with ${model}...` }
       });
 
-      // Race the Gemini call against user cancellation
+   
       const { query } = await Promise.race([
         this._callGemini(naturalLanguage, model, geminiKey, signal),
         abortPromise
@@ -267,7 +273,7 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
         )), 20000);
       });
 
-      // Race the Splunk execution against timeout AND user cancellation
+     
       const queryResult = await Promise.race([
         client.callTool({
           name: "splunk_run_query",

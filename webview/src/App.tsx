@@ -8,11 +8,8 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>("checking");
 
   useEffect(() => {
-    // Ask extension host if credentials exist
     window.vscodeApi.postMessage({ type: "CHECK_CREDENTIALS" });
 
-    // Fallback timeout — if no response in 500ms
-    // we are in browser dev mode, go straight to setup
     const timeout = setTimeout(() => {
       setAppState("setup");
     }, 500);
