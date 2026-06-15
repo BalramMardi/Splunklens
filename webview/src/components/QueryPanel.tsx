@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import {type QueryResult } from "../types.ts";
+import { type QueryResult } from "../types.ts";
 
 interface Props {
   onLogout: () => void;
@@ -13,8 +13,9 @@ export default function QueryPanel({ onLogout }: Props) {
   const [showSPL, setShowSPL] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
+  const [statusMessage, setStatusMessage] = useState("");
+  const [selectedModel, setSelectedModel] = useState("gemini-2.5-flash");
 
-  // Correctly register message listener with useEffect
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const msg = event.data;
@@ -26,11 +27,13 @@ export default function QueryPanel({ onLogout }: Props) {
         setError(msg.payload.message);
         setLoading(false);
       }
+      if (msg.type === "QUERY_STATUS") {
+        setStatusMessage(msg.payload.message);
+      }
     };
     window.addEventListener("message", handler);
-    // Cleanup — removes listener when component unmounts
     return () => window.removeEventListener("message", handler);
-  }, []); // empty array = runs once on mount only
+  }, []);
 
   function handleLogout() {
     window.vscodeApi.postMessage({ type: "CLEAR_CREDENTIALS" });
@@ -45,11 +48,34 @@ export default function QueryPanel({ onLogout }: Props) {
     setShowSPL(false);
     setHistory(prev => [q, ...prev.filter(h => h !== q).slice(0, 4)]);
 
-    // Send query text to extension host — no credentials, no API calls here
     window.vscodeApi.postMessage({
       type: "SUBMIT_QUERY",
-      payload: { query: q },
+      payload: { query: q, model: selectedModel },
     });
+  }
+
+  function handleCancel() {
+    window.vscodeApi.postMessage({ type: "CANCEL_QUERY" });
+  }
+
+  function handleOpenInSplunk() {
+    if (!result) return;
+    window.vscodeApi.postMessage({
+      type: "OPEN_IN_SPLUNK",
+      payload: { query: result.query }
+    });
+  }
+
+  function handleExportCSV() {
+    if (!result || !result.events.length) return;
+    window.vscodeApi.postMessage({
+      type: "EXPORT_CSV",
+      payload: { events: result.events }
+    });
+  }
+
+  function toggleSPL() {
+    setShowSPL(!showSPL);
   }
 
   return (
@@ -68,23 +94,44 @@ export default function QueryPanel({ onLogout }: Props) {
         }}>
           SplunkLens
         </h2>
-        <button
-          onClick={handleLogout}
-          style={{
-            fontSize: "11px",
-            background: "transparent",
-            color: "var(--vscode-descriptionForeground)",
-            border: "1px solid var(--vscode-input-border)",
-            borderRadius: "4px",
-            padding: "2px 8px",
-            cursor: "pointer",
-          }}
-        >
-          Logout
-        </button>
+        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+          <select
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            disabled={loading}
+            style={{
+              fontSize: "11px",
+              background: "var(--vscode-dropdown-background)",
+              color: "var(--vscode-dropdown-foreground)",
+              border: "1px solid var(--vscode-dropdown-border)",
+              borderRadius: "4px",
+              padding: "2px 4px",
+              cursor: loading ? "not-allowed" : "pointer"
+            }}
+          >
+            <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+            <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
+            <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+            <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite</option>
+          </select>
+          <button
+            onClick={handleLogout}
+            style={{
+              fontSize: "11px",
+              background: "transparent",
+              color: "var(--vscode-descriptionForeground)",
+              border: "1px solid var(--vscode-input-border)",
+              borderRadius: "4px",
+              padding: "2px 8px",
+              cursor: "pointer",
+            }}
+          >
+            Logout
+          </button>
+        </div>
       </div>
 
-      {/* Query input */}
       <div style={{ display: "flex", gap: "6px", marginBottom: "10px" }}>
         <input
           style={{
@@ -102,25 +149,40 @@ export default function QueryPanel({ onLogout }: Props) {
           onKeyDown={e => e.key === "Enter" && handleQuery(query)}
           disabled={loading}
         />
-        <button
-          style={{
-            padding: "6px 14px",
-            fontSize: "13px",
-            background: "var(--vscode-button-background)",
-            color: "var(--vscode-button-foreground)",
-            border: "none",
-            borderRadius: "4px",
-            cursor: loading ? "not-allowed" : "pointer",
-            opacity: loading ? 0.6 : 1,
-          }}
-          onClick={() => handleQuery(query)}
-          disabled={loading}
-        >
-          {loading ? "Searching..." : "Search"}
-        </button>
+        
+        {loading ? (
+          <button
+            style={{
+              padding: "6px 14px",
+              fontSize: "13px",
+              background: "var(--vscode-errorForeground)",
+              color: "white",
+              border: "none",
+              borderRadius: "4px",
+              cursor: "pointer",
+            }}
+            onClick={handleCancel}
+          >
+            Stop
+          </button>
+        ) : (
+          <button
+            style={{
+              padding: "6px 14px",
+              fontSize: "13px",
+              background: "var(--vscode-button-background)",
+              color: "var(--vscode-button-foreground)",
+              border: "none",
+              borderRadius: "4px",
+              cursor: "pointer",
+            }}
+            onClick={() => handleQuery(query)}
+          >
+            Search
+          </button>
+        )}
       </div>
 
-      {/* Query history chips */}
       {history.length > 0 && (
         <div style={{
           display: "flex",
@@ -151,18 +213,16 @@ export default function QueryPanel({ onLogout }: Props) {
         </div>
       )}
 
-      {/* Loading */}
       {loading && (
         <p style={{
           fontSize: "12px",
           color: "var(--vscode-descriptionForeground)",
           marginBottom: "8px"
         }}>
-          Translating query and searching Splunk...
+          {statusMessage || "Searching..."}
         </p>
       )}
 
-      {/* Error */}
       {error && (
         <p style={{
           fontSize: "12px",
@@ -173,7 +233,6 @@ export default function QueryPanel({ onLogout }: Props) {
         </p>
       )}
 
-      {/* Results */}
       {result && (
         <div>
           <div style={{
@@ -188,43 +247,67 @@ export default function QueryPanel({ onLogout }: Props) {
             }}>
               {result.resultCount} events — {result.timeRange}
             </span>
-            <button
-              onClick={() => setShowSPL(s => !s)}
-              style={{
-                fontSize: "11px",
-                background: "transparent",
-                color: "var(--vscode-textLink-foreground)",
-                border: "none",
-                cursor: "pointer",
-                padding: 0,
-              }}
-            >
-              {showSPL ? "Hide SPL" : "Show SPL"}
-            </button>
+            <div style={{ display: "flex", gap: "10px" }}>
+              <button
+                onClick={handleExportCSV}
+                style={{
+                  fontSize: "11px",
+                  background: "transparent",
+                  color: "var(--vscode-textLink-foreground)",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                Export CSV
+              </button>
+              <button
+                onClick={handleOpenInSplunk}
+                style={{
+                  fontSize: "11px",
+                  background: "transparent",
+                  color: "var(--vscode-textLink-foreground)",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                Open in Splunk
+              </button>
+              <button
+                onClick={toggleSPL}
+                style={{
+                  fontSize: "11px",
+                  background: "transparent",
+                  color: "var(--vscode-textLink-foreground)",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                {showSPL ? "Hide SPL" : "Show SPL"}
+              </button>
+            </div>
           </div>
 
-          <p style={{
-            fontSize: "12px",
-            color: "var(--vscode-descriptionForeground)",
-            marginBottom: "8px",
-            fontStyle: "italic"
-          }}>
-            {result.explanation}
-          </p>
-
           {showSPL && (
-            <pre style={{
-              fontSize: "11px",
-              background: "var(--vscode-textCodeBlock-background)",
-              color: "var(--vscode-foreground)",
-              padding: "8px",
-              borderRadius: "4px",
-              overflowX: "auto",
-              marginBottom: "10px",
-              whiteSpace: "pre-wrap",
-            }}>
-              {result.query}
-            </pre>
+            <div style={{ marginBottom: "12px" }}>
+              <div style={{
+                background: "var(--vscode-textCodeBlock-background)",
+                padding: "8px",
+                borderRadius: "4px",
+              }}>
+                <pre style={{
+                  fontSize: "11px",
+                  color: "var(--vscode-foreground)",
+                  overflowX: "auto",
+                  margin: 0,
+                  whiteSpace: "pre-wrap",
+                }}>
+                  {result.query}
+                </pre>
+              </div>
+            </div>
           )}
 
           <div style={{ fontSize: "12px" }}>

@@ -1,14 +1,26 @@
+# Ignore VS Code and test folders
 .vscode/**
 .vscode-test/**
-out/**
-node_modules/**
+**/.vscode-test.*
+
+# Ignore all raw source code (it's compiled into dist/ and webview-dist/)
 src/**
+webview/**
+**/*.ts
+**/*.tsx
+
+# Ignore all dependencies (esbuild bundles them for us)
+node_modules/**
+**/node_modules/**
+
+# Ignore config and build scripts
 .gitignore
 .yarnrc
 esbuild.js
 vsc-extension-quickstart.md
+tsconfig.json
 **/tsconfig.json
 **/eslint.config.mjs
+
+# Ignore source maps (unless you want them for debugging in production)
 **/*.map
-**/*.ts
-**/.vscode-test.*

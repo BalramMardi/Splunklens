@@ -2,7 +2,14 @@
   "name": "splunklens",
   "displayName": "Splunklens",
   "description": "Query splunk logs in plain English without leaving VS Code",
-  "version": "0.0.1",
+  "version": "1.0.0",
+  "publisher": "balram-mardi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BalramMardi/Splunklens"
+  },
+  "icon": "assets/icon.png",
   "engines": {
     "vscode": "^1.120.0"
   },
@@ -12,33 +19,33 @@
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
-  "viewsContainers": {
-    "activitybar": [
-      {
-        "id": "splunklens",
-        "title": "SplunkLens",
-        "icon": "$(search)"
-      }
-    ]
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "splunklens",
+          "title": "SplunkLens",
+          "icon": "assets/monologo.png"
+        }
+      ]
+    },
+    "views": {
+      "splunklens": [
+        {
+          "type": "webview",
+          "id": "splunklens.view",
+          "name": "SplunkLens"
+        }
+      ]
+    }
   },
-  "views": {
-    "splunklens": [
-      {
-        "type": "webview",
-        "id": "splunklens.view",
-        "name": "SplunkLens"
-      }
-    ]
-  }
-},
- "scripts": {
-  "vscode:prepublish": "npm run build",
-  "build": "npm run build:webview && node esbuild.js",
-  "build:webview": "cd webview && npm run build && xcopy /E /Y /I dist ..\\webview-dist",
-  "watch": "node esbuild.js --watch",
-  "compile": "node esbuild.js",
-  "lint": "eslint src"
-},
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "npm run build:webview && node esbuild.js",
+    "build:webview": "cd webview && npm run build && cd .. && shx cp -r webview/dist webview-dist",
+    "watch": "node esbuild.js --watch",
+    "compile": "node esbuild.js",
+    "lint": "eslint src"
+  },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.19.19",
@@ -48,10 +55,12 @@
     "esbuild": "^0.27.3",
     "eslint": "^9.39.3",
     "npm-run-all": "^4.1.5",
+    "shx": "^0.4.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.56.1"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "node-fetch": "^3.3.2"
   }
 }

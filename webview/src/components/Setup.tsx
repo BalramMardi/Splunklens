@@ -5,25 +5,26 @@ interface Props {
 }
 
 export default function Setup({ onSave }: Props) {
-  const [splunkUrl, setSplunkUrl] = useState("https://localhost:8089");
-  const [splunkToken, setSplunkToken] = useState("");
-  const [geminiKey, setGeminiKey] = useState("");
-  const [error, setError] = useState("");
+  const [splunkUrl, setSplunkUrl]       = useState("https://localhost:8089");
+  const [splunkWebUrl, setSplunkWebUrl] = useState("http://localhost:8000");
+  const [mcpToken,  setMcpToken]        = useState("");
+  const [geminiKey, setGeminiKey]       = useState("");
+  const [error,     setError]           = useState("");
 
   function handleSave() {
-    if (!splunkUrl || !splunkToken || !geminiKey) {
-      setError("All three fields are required.");
+    if (!splunkUrl || !splunkWebUrl || !mcpToken || !geminiKey) {
+      setError("All fields are required.");
       return;
     }
     setError("");
-    // Send to extension host — credentials stored in SecretStorage there
-    // They never live in webview memory after this point
-
-    const normalizedUrl = splunkUrl.replace(/\/+$/, "");
-
     window.vscodeApi.postMessage({
       type: "SAVE_CREDENTIALS",
-      payload: { splunkUrl:normalizedUrl, splunkToken, geminiKey },
+      payload: {
+        splunkUrl: splunkUrl.replace(/\/+$/, ""),
+        splunkWebUrl: splunkWebUrl.replace(/\/+$/, ""),
+        mcpToken,
+        geminiKey
+      },
     });
     onSave();
   }
@@ -43,11 +44,11 @@ export default function Setup({ onSave }: Props) {
         color: "var(--vscode-descriptionForeground)",
         marginBottom: "16px"
       }}>
-        Credentials are stored securely in VS Code SecretStorage.
-        They never leave the extension host.
+        Credentials stored securely in VS Code SecretStorage.
+        Query execution powered by Splunk MCP Server.
       </p>
 
-      <label style={labelStyle}>Splunk URL</label>
+      <label style={labelStyle}>Splunk API URL (Port 8089)</label>
       <input
         style={inputStyle}
         value={splunkUrl}
@@ -55,13 +56,21 @@ export default function Setup({ onSave }: Props) {
         placeholder="https://localhost:8089"
       />
 
-      <label style={labelStyle}>Splunk Token</label>
+      <label style={labelStyle}>Splunk Web URL (Port 8000)</label>
+      <input
+        style={inputStyle}
+        value={splunkWebUrl}
+        onChange={e => setSplunkWebUrl(e.target.value)}
+        placeholder="http://localhost:8000"
+      />
+
+      <label style={labelStyle}>Splunk MCP Token</label>
       <input
         style={inputStyle}
         type="password"
-        value={splunkToken}
-        onChange={e => setSplunkToken(e.target.value)}
-        placeholder="your-splunk-token"
+        value={mcpToken}
+        onChange={e => setMcpToken(e.target.value)}
+        placeholder="Your encrypted MCP token"
       />
 
       <label style={labelStyle}>Gemini API Key</label>

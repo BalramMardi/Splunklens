@@ -1,49 +1,29 @@
 import * as vscode from "vscode";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import * as https from "https";
-import * as http from "http";
 
-// ─── Constants ───────────────────────────────────────────────────────────────
+const SYSTEM_PROMPT = `Role: Splunk SPL Expert. Convert NL to SPL.
+Rules:
+- Omit index unless specified.
+- Escape double quotes: event_type=\"login_failed\"
+- Start query with "search "
+Time: "last Nh"=-Nh, "today"=-24h, "last 7 days"=-7d, "all time"=0, empty=-1h
+Allowed: search, stats, table, sort, where, eval, rex, head, tail, timechart, fields
+Default end: | head 50 | table _time event_type severity src_ip user message (unless stats/count).
+Output ONLY JSON: {"query":"<SPL>"}
 
-const SYSTEM_PROMPT = `You are a Splunk SPL expert. Convert natural language to SPL.
-
-Index: Use index=main unless user names another index (e.g. "botsv3" → index=botsv3).
-
-Time range:
-- "last Nh" → earliest=-Nh (e.g. "last 10 hours" → earliest=-10h)
-- "today" → earliest=-24h
-- "last 7 days" → earliest=-7d
-- "all time" / "everything" / "ever" → omit earliest entirely
-- nothing mentioned → earliest=-1h
-
-Commands allowed: search, stats, table, sort, where, eval, rex, head, tail, timechart, fields
-Commands forbidden: delete, drop, outputlookup, sendemail, rest, script
-
-Default ending: | table _time event_type severity src_ip user message
-Exception: if user asks for counts or stats, use appropriate stats command instead.
-
-Return ONLY this JSON, no markdown, no extra text:
-{"query":"<SPL>","explanation":"<one sentence>"}
-
-Examples:
+Ex:
 User: failed logins last 2 hours
-{"query":"index=main event_type=\"login_failed\" earliest=-2h | table _time event_type severity src_ip user message","explanation":"Failed logins in the last 2 hours."}
-User: errors in botsv3 all time
-{"query":"index=botsv3 | table _time event_type severity src_ip user message","explanation":"All events in botsv3 across all time."}
-User: count events by type today
-{"query":"index=main earliest=-24h | stats count by event_type | sort -count","explanation":"Event counts by type today."}`;
+{"query":"search event_type=\"login_failed\" earliest=-2h | head 50 | table _time event_type severity src_ip user message"}`;
 
 const DANGEROUS_COMMANDS = [
   "delete", "drop", "outputlookup",
   "sendemail", "rest", "script"
 ];
 
-// ─── Activation ──────────────────────────────────────────────────────────────
-
 export function activate(context: vscode.ExtensionContext) {
-  console.log("SplunkLens is now active");
-
   const provider = new SplunkLensViewProvider(context);
-
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       SplunkLensViewProvider.viewType,
@@ -54,11 +34,11 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {}
 
-// ─── Webview Provider ─────────────────────────────────────────────────────────
-
 class SplunkLensViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "splunklens.view";
   private _view?: vscode.WebviewView;
+  private _mcpClient?: Client;
+  private _currentAbortController?: AbortController;
 
   constructor(private readonly _context: vscode.ExtensionContext) {}
 
@@ -74,7 +54,6 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this._getHtml(webviewView.webview);
 
-    // Listen for messages from the webview
     webviewView.webview.onDidReceiveMessage(
       msg => this._handleMessage(msg, webviewView.webview),
       undefined,
@@ -82,20 +61,17 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
-  // ─── Message Handler ───────────────────────────────────────────────────────
-
   private async _handleMessage(
-    msg: { type: string; payload?: any },
+    msg: { type: string; payload?: Record<string, unknown> },
     webview: vscode.WebviewView["webview"]
   ) {
     switch (msg.type) {
-
       case "CHECK_CREDENTIALS": {
-        const splunkUrl   = await this._context.secrets.get("splunkUrl");
-        const splunkToken = await this._context.secrets.get("splunkToken");
-        const geminiKey   = await this._context.secrets.get("geminiKey");
-
-        if (splunkUrl && splunkToken && geminiKey) {
+        const splunkUrl    = await this._context.secrets.get("splunkUrl");
+        const splunkWebUrl = await this._context.secrets.get("splunkWebUrl");
+        const mcpToken     = await this._context.secrets.get("mcpToken");
+        const geminiKey    = await this._context.secrets.get("geminiKey");
+        if (splunkUrl && splunkWebUrl && mcpToken && geminiKey) {
           webview.postMessage({ type: "CREDENTIALS_EXIST" });
         } else {
           webview.postMessage({ type: "CREDENTIALS_MISSING" });
@@ -104,82 +80,209 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
       }
 
       case "SAVE_CREDENTIALS": {
-        const { splunkUrl, splunkToken, geminiKey } = msg.payload;
-        await this._context.secrets.store("splunkUrl",   splunkUrl);
-        await this._context.secrets.store("splunkToken", splunkToken);
-        await this._context.secrets.store("geminiKey",   geminiKey);
-        vscode.window.showInformationMessage(
-          "SplunkLens: Credentials saved securely."
-        );
+        if (!msg.payload) return;
+        const { splunkUrl, splunkWebUrl, mcpToken, geminiKey } = msg.payload as Record<string, string>;
+        await this._context.secrets.store("splunkUrl", splunkUrl);
+        await this._context.secrets.store("splunkWebUrl", splunkWebUrl);
+        await this._context.secrets.store("mcpToken",  mcpToken);
+        await this._context.secrets.store("geminiKey", geminiKey);
+        this._mcpClient = undefined;
+        vscode.window.showInformationMessage("SplunkLens: Credentials saved securely.");
+        break;
+      }
+
+      case "CLEAR_CREDENTIALS": {
+        await this._context.secrets.delete("splunkUrl");
+        await this._context.secrets.delete("splunkWebUrl");
+        await this._context.secrets.delete("mcpToken");
+        await this._context.secrets.delete("geminiKey");
+        this._mcpClient = undefined;
+        vscode.window.showInformationMessage("SplunkLens: Credentials cleared.");
         break;
       }
 
       case "SUBMIT_QUERY": {
-        await this._handleQuery(msg.payload.query, webview);
+        if (!msg.payload || typeof msg.payload.query !== "string") return;
+        const model = typeof msg.payload.model === "string" ? msg.payload.model : "gemini-2.5-flash";
+        await this._handleQuery(msg.payload.query, model, webview);
         break;
       }
 
-	  case "CLEAR_CREDENTIALS": {
-		await this._context.secrets.delete("splunkUrl");
-		await this._context.secrets.delete("splunkToken");
-		await this._context.secrets.delete("geminiKey");
-		vscode.window.showInformationMessage(
-			"SplunkLens: Credentials cleared."
-		);
-		break;
-	  }
+      case "CANCEL_QUERY": {
+        if (this._currentAbortController) {
+          this._currentAbortController.abort();
+          this._currentAbortController = undefined;
+        }
+        break;
+      }
+
+      case "OPEN_IN_SPLUNK": {
+        const splunkWebUrl = await this._context.secrets.get("splunkWebUrl");
+        if (splunkWebUrl && msg.payload && typeof msg.payload.query === "string") {
+          const encodedSpl = encodeURIComponent(msg.payload.query);
+          const fullUrl = `${splunkWebUrl}/en-US/app/search/search?q=${encodedSpl}`;
+          vscode.env.openExternal(vscode.Uri.parse(fullUrl));
+        }
+        break;
+      }
+
+      case "EXPORT_CSV": {
+        if (!msg.payload) return;
+        const events = msg.payload.events as Record<string, unknown>[];
+        if (!events || events.length === 0) {
+          vscode.window.showErrorMessage("No events to export.");
+          break;
+        }
+
+        const uri = await vscode.window.showSaveDialog({
+          filters: { "CSV Files": ["csv"] },
+          defaultUri: vscode.Uri.file("splunk_results.csv")
+        });
+
+        if (uri) {
+          try {
+            const keys = Array.from(new Set(events.flatMap(e => Object.keys(e))));
+            let csv = keys.join(",") + "\n";
+
+            for (const event of events) {
+              const row = keys.map(key => {
+                let val = event[key];
+                if (val === null || val === undefined) {
+                  return "";
+                }
+                if (typeof val === "object") {
+                  val = JSON.stringify(val);
+                } else {
+                  val = String(val);
+                }
+                val = val.replace(/"/g, '""');
+                if (val.includes(",") || val.includes('"') || val.includes("\n")) {
+                  return `"${val}"`;
+                }
+                return val;
+              });
+              csv += row.join(",") + "\n";
+            }
+
+            await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(csv));
+            vscode.window.showInformationMessage("SplunkLens: CSV exported successfully.");
+          } catch (e) {
+            vscode.window.showErrorMessage("SplunkLens: Failed to export CSV.");
+          }
+        }
+        break;
+      }
     }
   }
 
-  // ─── Core Query Pipeline ───────────────────────────────────────────────────
+  private async _getMCPClient(): Promise<Client> {
+    if (this._mcpClient) {
+      return this._mcpClient;
+    }
+
+    const splunkUrl = await this._context.secrets.get("splunkUrl");
+    const mcpToken  = await this._context.secrets.get("mcpToken");
+
+    if (!splunkUrl || !mcpToken) {
+      throw new Error("Credentials not found. Please run setup again.");
+    }
+
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`${splunkUrl}/services/mcp`),
+      {
+        requestInit: {
+          headers: {
+            "Authorization": `Bearer ${mcpToken}`
+          }
+        }
+      }
+    );
+
+    const client = new Client(
+      { name: "splunklens", version: "1.0.0" },
+      {}
+    );
+
+    await client.connect(transport);
+    this._mcpClient = client;
+    return client;
+  }
 
   private async _handleQuery(
     naturalLanguage: string,
+    model: string,
     webview: vscode.WebviewView["webview"]
   ) {
-    try {
-      // Step 1 — load credentials from SecretStorage
-      const splunkUrl   = await this._context.secrets.get("splunkUrl");
-      const splunkToken = await this._context.secrets.get("splunkToken");
-      const geminiKey   = await this._context.secrets.get("geminiKey");
+    let timerId: ReturnType<typeof setTimeout> | undefined;
+    
+    // Set up cancellation tracking
+    this._currentAbortController = new AbortController();
+    const signal = this._currentAbortController.signal;
 
-      if (!splunkUrl || !splunkToken || !geminiKey) {
-        webview.postMessage({
-          type: "QUERY_ERROR",
-          payload: { message: "Credentials not found. Please run setup again." }
-        });
-        return;
+    // A helper promise that immediately rejects if the user hits "Stop"
+    const abortPromise = new Promise<never>((_, reject) => {
+      if (signal.aborted) return reject(new Error("Query cancelled by user."));
+      signal.addEventListener("abort", () => reject(new Error("Query cancelled by user.")));
+    });
+
+    try {
+      const geminiKey = await this._context.secrets.get("geminiKey");
+
+      if (!geminiKey) {
+        throw new Error("Gemini API key not found. Please run setup again.");
       }
 
-      // Step 2 — call Gemini to translate natural language to SPL
-      const { query, explanation } = await this._callGemini(
-        naturalLanguage,
-        geminiKey
-      );
+      webview.postMessage({
+        type: "QUERY_STATUS",
+        payload: { message: `Translating query with ${model}...` }
+      });
 
-      // Step 3 — validate SPL for dangerous commands
+      // Race the Gemini call against user cancellation
+      const { query } = await Promise.race([
+        this._callGemini(naturalLanguage, model, geminiKey, signal),
+        abortPromise
+      ]);
+
       const foundDangerous = DANGEROUS_COMMANDS.find(cmd =>
         query.toLowerCase().includes(cmd)
       );
       if (foundDangerous) {
-        webview.postMessage({
-          type: "QUERY_ERROR",
-          payload: {
-            message: `Generated query contains unsafe command: ${foundDangerous}`
-          }
-        });
-        return;
+        throw new Error(
+          `Query contains unsafe command: ${foundDangerous}. Try rephrasing.`
+        );
       }
 
-      // Step 4 — run SPL against Splunk
-      const events = await this._querySplunk(query, splunkUrl, splunkToken);
+      webview.postMessage({
+        type: "QUERY_STATUS",
+        payload: { message: "Searching Splunk via MCP..." }
+      });
 
-      // Step 5 — send results back to webview
+      const client = await this._getMCPClient();
+
+      const timeout = new Promise<never>((_, reject) => {
+        timerId = setTimeout(() => reject(new Error(
+          "Query timed out. Try adding a narrower time range."
+        )), 20000);
+      });
+
+      // Race the Splunk execution against timeout AND user cancellation
+      const queryResult = await Promise.race([
+        client.callTool({
+          name: "splunk_run_query",
+          arguments: { query }
+        }),
+        timeout,
+        abortPromise
+      ]);
+
+      const events = parseQueryResults(queryResult);
+
       webview.postMessage({
         type: "QUERY_RESULTS",
         payload: {
           query,
-          explanation,
           events,
           resultCount: events.length,
           timeRange: extractTimeRange(query)
@@ -187,23 +290,30 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
       });
 
     } catch (err: unknown) {
+      let errorMessage = "Unknown error occurred.";
+      if (err instanceof Error) {
+        // Suppress standard abort errors into a cleaner message if needed
+        errorMessage = err.name === "AbortError" ? "Query cancelled by user." : err.message;
+      }
+      
       webview.postMessage({
         type: "QUERY_ERROR",
-        payload: {
-          message: err instanceof Error ? err.message : "Unknown error occurred."
-        }
+        payload: { message: errorMessage }
       });
+    } finally {
+      if (timerId) clearTimeout(timerId);
+      this._currentAbortController = undefined;
     }
   }
 
-  // ─── Gemini API Call ───────────────────────────────────────────────────────
-
   private async _callGemini(
     naturalLanguage: string,
-    geminiKey: string
-  ): Promise<{ query: string; explanation: string }> {
+    model: string,
+    geminiKey: string,
+    signal: AbortSignal
+  ): Promise<{ query: string }> {
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${geminiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`;
 
     const body = JSON.stringify({
       system_instruction: {
@@ -212,9 +322,21 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
       contents: [{ parts: [{ text: naturalLanguage }] }]
     });
 
-    const rawText = await httpsPost(url, body, {
-      "Content-Type": "application/json"
-    });
+    let rawText: string;
+    try {
+      rawText = await httpsPost(url, body, {
+        "Content-Type": "application/json"
+      }, signal);
+    } catch (e: any) {
+      if (e.name === "AbortError") throw e;
+      if (e.message?.includes("HTTP 404")) {
+        throw new Error(`You do not have the model '${model}' in your Gemini package, or it does not exist.`);
+      }
+      if (e.message?.includes("HTTP 429")) {
+        throw new Error("Your Gemini model quota is exhausted. Please try again later.");
+      }
+      throw e;
+    }
 
     const data = JSON.parse(rawText);
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -223,70 +345,36 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
       throw new Error("Gemini returned no response. Check your API key.");
     }
 
-    // Strip markdown code fences if Gemini adds them despite instructions
     const cleaned = text.replace(/```json|```/g, "").trim();
 
-    let parsed: { query: string; explanation: string };
+    let query = "";
+
     try {
-      parsed = JSON.parse(cleaned);
+      const parsed = JSON.parse(cleaned);
+      query = parsed.query;
     } catch {
-      throw new Error(`Gemini returned invalid JSON: ${cleaned.slice(0, 100)}`);
-    }
+      const queryMatch = cleaned.match(/"query"\s*:\s*"([\s\S]*?)"/);
 
-    if (!parsed.query || !parsed.explanation) {
-      throw new Error("Gemini response missing query or explanation field.");
-    }
-
-    return parsed;
-  }
-
-  // ─── Splunk Query ──────────────────────────────────────────────────────────
-
-  private async _querySplunk(
-    spl: string,
-    splunkUrl: string,
-    splunkToken: string
-  ): Promise<any[]> {
-
-    const url = `${splunkUrl}/services/search/jobs/export`;
-
-    const params = new URLSearchParams({
-      search: spl.startsWith("search ") ? spl : `search ${spl}`,
-      output_mode: "json",
-      count: "10"
-    });
-
-    const rawText = await httpsPost(
-      url,
-      params.toString(),
-      {
-        "Authorization": `Splunk ${splunkToken}`,
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      // Accept self-signed certificates for localhost Splunk
-      false
-    );
-
-    // Splunk /export returns one JSON object per line (NDJSON format)
-    const events: any[] = [];
-    const lines = rawText.split("\n").filter(l => l.trim());
-
-    for (const line of lines) {
-      try {
-        const parsed = JSON.parse(line);
-        // Only include result rows, skip preview/summary rows
-        if (parsed.result) {
-          events.push(parsed.result);
+      if (queryMatch) {
+        query = queryMatch[1].trim();
+      } else {
+        const splMatch = cleaned.match(/search[\s\S]*?(?=",|"}|$)/);
+        if (splMatch) {
+          query = splMatch[0].trim();
+        } else {
+          throw new Error(
+            `Gemini returned invalid JSON: ${cleaned.slice(0, 100)}`
+          );
         }
-      } catch {
-        // Skip malformed lines
       }
     }
 
-    return events;
-  }
+    if (!query) {
+      throw new Error("Gemini response missing query field.");
+    }
 
-  // ─── HTML Builder ──────────────────────────────────────────────────────────
+    return { query };
+  }
 
   private _getHtml(webview: vscode.Webview): string {
     const distUri = vscode.Uri.joinPath(
@@ -312,8 +400,7 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'none';
              style-src ${webview.cspSource} 'unsafe-inline';
-             script-src 'nonce-${nonce}';
-             connect-src https://generativelanguage.googleapis.com;">
+             script-src 'nonce-${nonce}';">
   <link rel="stylesheet" href="${styleUri}"/>
   <title>SplunkLens</title>
 </head>
@@ -325,39 +412,69 @@ class SplunkLensViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+function parseQueryResults(result: unknown): Record<string, unknown>[] {
+  try {
+    const resObj = result as Record<string, unknown>;
+    const content = resObj?.content;
+    if (!content || !Array.isArray(content)) { return []; }
+
+    for (const block of content) {
+      if (block.type === "text" && block.text) {
+        const text: string = block.text;
+
+        try {
+          const parsed = JSON.parse(text);
+          if (Array.isArray(parsed)) { return parsed; }
+          if (parsed.results && Array.isArray(parsed.results)) {
+            return parsed.results;
+          }
+        } catch { }
+
+        const lines = text.split("\n").filter((l: string) => l.trim());
+        const events: Record<string, unknown>[] = [];
+        for (const line of lines) {
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.result)  { events.push(parsed.result); }
+            else if (parsed._time) { events.push(parsed); }
+          } catch { }
+        }
+        if (events.length > 0) { return events; }
+      }
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
 
 function httpsPost(
   url: string,
   body: string,
   headers: Record<string, string>,
-  rejectUnauthorized = true
+  signal?: AbortSignal
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
-    const isHttps = parsed.protocol === "https:";
-    const lib = isHttps ? https : http;
 
     const options = {
       hostname: parsed.hostname,
-      port: parsed.port || (isHttps ? 443 : 80),
+      port: parsed.port || 443,
       path: parsed.pathname + parsed.search,
       method: "POST",
       headers: {
         ...headers,
         "Content-Length": Buffer.byteLength(body)
       },
-      rejectUnauthorized: isHttps ? rejectUnauthorized : undefined
+      signal
     };
 
-    const req = lib.request(options as any, res => {
+    const req = https.request(options, res => {
       let data = "";
       res.on("data", chunk => { data += chunk; });
       res.on("end", () => {
         if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(
-            `HTTP ${res.statusCode}: ${data.slice(0, 200)}`
-          ));
+          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
         } else {
           resolve(data);
         }

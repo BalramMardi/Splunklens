@@ -1,12 +1,12 @@
 export interface Credentials {
   splunkUrl: string;
-  splunkToken: string;
+  splunkWebUrl: string;
+  mcpToken: string;
   geminiKey: string;
 }
 
 export interface QueryResult {
   query: string;
-  explanation: string;
   events: SplunkEvent[];
   resultCount: number;
   timeRange: string;
@@ -19,5 +19,5 @@ export interface SplunkEvent {
   message?: string;
   src_ip?: string;
   user?: string;
-  [key: string]: string | undefined;
+  [key: string]: unknown;
 }
